@@ -793,7 +793,7 @@ async function saveToCloud() {
   } catch (e) { console.error(e); setSyncStatus('error', 'Lỗi đồng bộ'); }
 }
 
-function attPut(date, empId, rec, immediate = false) {
+function attPut(date, empId, rec, immediate = false) {  console.log('💾 attPut', { date, empId, month: monthOf(date), immediate });
   if (!isDateStr(date)) { console.warn('attPut: ngày không hợp lệ', date); return; }
   attSetPaths.set(`days.${date}.${empId}`, cleanObj(rec));
   attDelPaths.delete(`days.${date}.${empId}`);
@@ -880,7 +880,7 @@ async function pushMonth(month) {
     inflightMonths.delete(month);
   }
 }
-function scheduleMonth(month, immediate) {
+function scheduleMonth(month, immediate) {  console.log('⏱ scheduleMonth', { month, immediate, dirtyHasMonth: dirtyMonths.has(month), attSetSize: attSetPaths.size });
   clearTimeout(attTimers.get(month));
   if (immediate) { attTimers.delete(month); pushMonth(month); return; }
   attTimers.set(month, setTimeout(() => { attTimers.delete(month); pushMonth(month); }, 400));
@@ -1525,7 +1525,7 @@ function resetField(date, empId, field) {
   commitCell(date, empId, rec);
   renderAtt();
 }
-function commitCell(date, empId, rec) {
+function commitCell(date, empId, rec) {  console.log('📝 commitCell', { date, empId, rec: JSON.parse(JSON.stringify(rec)) });
   if (isEmptyRec(rec)) {
     delete state.att[date][empId];
     if (!Object.keys(state.att[date]).length) delete state.att[date];
