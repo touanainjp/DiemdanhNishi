@@ -2481,6 +2481,87 @@ window.addEventListener('beforeunload', (e) => {
     return e.returnValue;
   }
 });
+/* ============== DEBUG PATCH ============== */
+window.__dbgState = () => {
+  const out = {
+    currentUser: currentUser ? currentUser.uid : null,
+    isConfigured,
+    dirtyMonths: [...dirtyMonths],
+    attSetPaths: [...attSetPaths.keys()],
+    attDelPaths: [...attDelPaths],
+    inflightMonths: [...inflightMonths],
+    loadedMonths: [...loadedMonths],
+    attUnsubs: [...attUnsubs.keys()],
+    stateEmpsCount: state.emps.length,
+    stateAttDays: Object.keys(state.att),
+    stateAttTodayKeys: (function(){
+      const d = $('#attDate')?.value || todayStr();
+      return state.att[d] ? Object.keys(state.att[d]) : [];
+    })()
+  };
+  console.table(out);
+  return out;
+};
+
+window.__dbgPush = async (month) => {
+  month = month || monthOf($('#attDate').value || todayStr());
+  console.log('🚀 force push month =', month);
+  console.log('   BEFORE:', { dirty: [...dirtyMonths], attSet: [...attSetPaths.keys()] });
+  dirtyMonths.add(month);
+  try {
+    await pushMonth(month);
+    console.log('   ✅ pushMonth chạy xong');
+  } catch (e) {
+    console.error('   ❌ pushMonth ném lỗi:', e);
+  }
+  console.log('   AFTER:', { dirty: [...dirtyMonths], attSet: [...attSetPaths.keys()] });
+};
+
+window.__dbgRead = async (month) => {
+  month = month || monthOf($('#attDate').value || todayStr());
+  try {
+    const snap = await getDoc(attRef(month));
+    const d = snap.exists() ? snap.data() : null;
+    console.log(`📥 Server att/${month}:`, d);
+    return d;
+  } catch (e) {
+    console.error('❌ Đọc server lỗi:', e.code, e.message);
+  }
+};
+
+window.__dbgSimulate = async () => {
+  const date = $('#attDate').value || todayStr();
+  const emp = state.emps[0];
+  if (!emp) { console.error('❌ Không có nhân viên'); return; }
+  console.log(`🎬 Giả lập bấm "Vắng ちょうれい" cho ${emp.name} ngày ${date}`);
+  console.log('   BEFORE:', {
+    stateAttEntry: state.att[date]?.[emp.id] || null,
+    dirty: [...dirtyMonths],
+    attSet: [...attSetPaths.keys()]
+  });
+  setField(date, emp.id, 'chore', 'absent');
+  console.log('   AFTER setField:', {
+    stateAttEntry: state.att[date]?.[emp.id] || null,
+    dirty: [...dirtyMonths],
+    attSet: [...attSetPaths.keys()]
+  });
+  await new Promise(r => setTimeout(r, 2000));
+  console.log('   AFTER 2s:', {
+    dirty: [...dirtyMonths],
+    attSet: [...attSetPaths.keys()],
+    inflight: [...inflightMonths]
+  });
+  await window.__dbgRead(monthOf(date));
+};
+
+window.__dbgWrapPush = () => {
+  // Không override được pushMonth từ Console vì là module scope.
+  // Nhưng có thể log khi gọi:
+  console.log('Lưu ý: muốn log pushMonth tự động thì thêm console.log vào trong hàm pushMonth.');
+};
+
+console.log('🐛 Debug sẵn sàng. Gõ: __dbgState() | __dbgSimulate() | __dbgPush() | __dbgRead("YYYY-MM")');
+/* ============ KẾT THÚC DEBUG ============ */
 startApp();
 </script>
 </body>
