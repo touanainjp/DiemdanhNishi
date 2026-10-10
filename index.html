@@ -1677,7 +1677,7 @@ async function deleteAccount(uid) {
   if (!acc) return;
   if (!confirm(`XOÁ tài khoản "${acc.loginId}" khỏi danh sách?\n\nLưu ý: chỉ xoá khỏi danh sách app. Để xoá vĩnh viễn khỏi Firebase, bạn cần vào Firebase Console → Authentication → Users → xoá thủ công.`)) return;
   try {
-    await deleteDoc(doc(db, 'shared', 'accounts', uid));
+    await deleteDoc(doc(db, 'accounts', uid));
     toast('🗑 Đã xoá khỏi danh sách');
   } catch (e) { console.error(e); toast('⚠️ Không xoá được'); }
 }
