@@ -606,8 +606,8 @@ const ATTIRE_OPTS = {
   pants:  { label: 'Quần',        icon: '👖' }
 };
 
-const STORE_BASE = 'diemdanh_v14';
-const LEGACY_KEYS = ['diemdanh_v13', 'diemdanh_v12', 'diemdanh_v11'];
+const STORE_BASE = 'diemdanh_v15';
+const LEGACY_KEYS = ['diemdanh_v14', 'diemdanh_v13', 'diemdanh_v12', 'diemdanh_v11'];
 const LAST_UID_KEY = STORE_BASE + ':lastUid';
 
 const metaRef = () => doc(db, 'app', 'meta');
@@ -621,15 +621,7 @@ let reportSortMode = 'date', reportViewMode = 'grouped';
 let reportViolationFilters = { absent: true, late: true, unpaid: true, paid: true, attire: true };
 
 const loadedMonths = new Set();
-const dirtyMonths = new Set();
-const inflightMonths = new Set();
 const attUnsubs = new Map();
-const attTimers = new Map();
-const metaSetPaths = new Map();
-const metaDelPaths = new Set();
-const attSetPaths = new Map();
-const attDelPaths = new Set();
-let metaDirty = false, metaInflight = false, metaTimer = null;
 let storageFull = false, reportHasRun = false, reportRunning = false;
 
 const monthOf = d => String(d || '').slice(0, 7);
@@ -716,7 +708,6 @@ function daysOfMonth(month) {
   Object.keys(state.att).forEach(d => { if (monthOf(d) === month) out[d] = state.att[d]; });
   return out;
 }
-function markAttDirty(date) { if (isDateStr(date)) dirtyMonths.add(monthOf(date)); }
 const cleanObj = o => {
   const out = {};
   Object.keys(o || {}).forEach(k => { if (o[k] !== undefined) out[k] = o[k]; });
@@ -724,193 +715,121 @@ const cleanObj = o => {
 };
 
 /* ============================================================
-   PUSH META — đã sửa lỗi race condition (không mất thay đổi
-   được thêm trong lúc await updateDoc)
+   SYNC ENGINE v2 — GHI TRỰC TIẾP, KHÔNG QUEUE
    ============================================================ */
-function metaPut(col, item, immediate = false) {
-  metaSetPaths.set(col + '.' + item.id, cleanObj(item));
-  metaDelPaths.delete(col + '.' + item.id);
-  metaDirty = true; saveLocal();
+
+async function metaPut(col, item) {
+  saveLocal();
   if (!currentUser || !isConfigured) return;
-  clearTimeout(metaTimer);
-  if (immediate) pushMeta(); else metaTimer = setTimeout(pushMeta, 400);
-}
-function metaDel(col, id, immediate = false) {
-  metaSetPaths.delete(col + '.' + id);
-  metaDelPaths.add(col + '.' + id);
-  metaDirty = true; saveLocal();
-  if (!currentUser || !isConfigured) return;
-  clearTimeout(metaTimer);
-  if (immediate) pushMeta(); else metaTimer = setTimeout(pushMeta, 400);
-}
-async function pushMeta() {
-  if (!currentUser || !isConfigured || !metaDirty || metaInflight) return;
-  metaInflight = true; setSyncStatus('syncing', 'Đang lưu...');
+  setSyncStatus('syncing', 'Đang lưu...');
   try {
-    // 1) Snapshot những gì sẽ gửi ở lần này
-    const setSnapshot = new Map(metaSetPaths);
-    const delSnapshot = new Set(metaDelPaths);
-
-    const payload = {};
-    setSnapshot.forEach((v, p) => { payload[p] = v; });
-    delSnapshot.forEach(p => { payload[p] = deleteField(); });
-
-    if (Object.keys(payload).length) {
-      try {
-        await updateDoc(metaRef(), payload);
-      } catch (e) {
-        await setDoc(metaRef(), { depts: {}, emps: {}, shifts: {}, owner: currentUser.uid, updatedAt: serverTimestamp() }, { merge: true });
-        await updateDoc(metaRef(), payload);
-      }
-    }
-
-    // 2) Chỉ xoá path nếu giá trị hiện tại VẪN là giá trị đã gửi
-    //    (nếu bị ghi đè trong lúc await thì giữ lại để gửi tiếp)
-    setSnapshot.forEach((v, p) => { if (metaSetPaths.get(p) === v) metaSetPaths.delete(p); });
-    delSnapshot.forEach(p => { if (metaDelPaths.has(p) && !metaSetPaths.has(p)) metaDelPaths.delete(p); });
-
-    // 3) Còn tồn đọng → hẹn gửi lại
-    if (metaSetPaths.size > 0 || metaDelPaths.size > 0) {
-      metaDirty = true;
-      clearTimeout(metaTimer);
-      metaTimer = setTimeout(pushMeta, 300);
-    } else {
-      metaDirty = false;
-      setSyncStatus('ok', 'Đã đồng bộ');
-    }
+    await setDoc(metaRef(),
+      { [col]: { [item.id]: cleanObj(item) }, updatedAt: serverTimestamp() },
+      { merge: true });
+    setSyncStatus('ok', 'Đã đồng bộ');
+    console.log('✅ [metaPut]', col, item.id);
   } catch (e) {
-    console.error(e); setSyncStatus('error', 'Lỗi đồng bộ');
-  } finally { metaInflight = false; }
+    console.error('❌ [metaPut]', col, item.id, e.code, e.message);
+    setSyncStatus('error', 'Lỗi: ' + (e.code || ''));
+  }
 }
+
+async function metaDel(col, id) {
+  saveLocal();
+  if (!currentUser || !isConfigured) return;
+  setSyncStatus('syncing', 'Đang lưu...');
+  try {
+    await updateDoc(metaRef(), { [`${col}.${id}`]: deleteField() });
+    setSyncStatus('ok', 'Đã đồng bộ');
+    console.log('✅ [metaDel]', col, id);
+  } catch (e) {
+    if (e.code === 'not-found') { setSyncStatus('ok', 'Đã đồng bộ'); return; }
+    console.error('❌ [metaDel]', col, id, e.code, e.message);
+    setSyncStatus('error', 'Lỗi: ' + (e.code || ''));
+  }
+}
+
 async function saveToCloud() {
   saveLocal();
   if (!currentUser || !isConfigured) return;
-  clearTimeout(metaTimer);
-  metaSetPaths.clear(); metaDelPaths.clear(); metaDirty = false;
   try {
-    await setDoc(metaRef(), { depts: toMap(state.depts), emps: toMap(state.emps), shifts: toMap(state.shifts), updatedAt: serverTimestamp() }, { merge: true });
+    await setDoc(metaRef(), {
+      depts: toMap(state.depts),
+      emps: toMap(state.emps),
+      shifts: toMap(state.shifts),
+      updatedAt: serverTimestamp()
+    }, { merge: true });
     setSyncStatus('ok', 'Đã đồng bộ');
-  } catch (e) { console.error(e); setSyncStatus('error', 'Lỗi đồng bộ'); }
+  } catch (e) {
+    console.error('❌ [saveToCloud]', e.code, e.message);
+    setSyncStatus('error', 'Lỗi: ' + (e.code || ''));
+  }
 }
 
-function attPut(date, empId, rec, immediate = false) {  console.log('💾 attPut', { date, empId, month: monthOf(date), immediate });
-  if (!isDateStr(date)) { console.warn('attPut: ngày không hợp lệ', date); return; }
-  attSetPaths.set(`days.${date}.${empId}`, cleanObj(rec));
-  attDelPaths.delete(`days.${date}.${empId}`);
-  saveLocal(); markAttDirty(date);
+async function attPut(date, empId, rec) {
+  if (!isDateStr(date)) { console.error('[attPut] ngày không hợp lệ:', date); return; }
+  saveLocal();
   if (!currentUser || !isConfigured) return;
-  scheduleMonth(monthOf(date), immediate);
-}
-function attDel(date, empId, immediate = false) {
-  if (!isDateStr(date)) { console.warn('attDel: ngày không hợp lệ', date); return; }
-  attSetPaths.delete(`days.${date}.${empId}`);
-  attDelPaths.add(`days.${date}.${empId}`);
-  saveLocal(); markAttDirty(date);
-  if (!currentUser || !isConfigured) return;
-  scheduleMonth(monthOf(date), immediate);
-}
 
-/* ============================================================
-   PUSH MONTH — đã sửa lỗi race condition (không mất thay đổi
-   được thêm trong lúc await updateDoc)
-   ============================================================ */
-async function pushMonth(month) {
- console.log('🔥 pushMonth(%s)', month);
-  if (!currentUser) { console.warn('   ⛔ return: chưa login'); return; }
-  if (!isConfigured) { console.warn('   ⛔ return: chưa cấu hình Firebase'); return; }
-  if (inflightMonths.has(month)) {
-    console.warn('   ⛔ return: INFLIGHT BỊ KẸT!', [...inflightMonths]);
-    return;
-  }
-  if (!dirtyMonths.has(month)) {
-    console.warn('   ⛔ return: KHÔNG DIRTY. dirty hiện tại =', [...dirtyMonths]);
-    return;
-  }
-  inflightMonths.add(month);
+  const month = monthOf(date);
+  const path = `days.${date}.${empId}`;
   setSyncStatus('syncing', 'Đang lưu...');
-  const prefix = 'days.' + month + '.';
+  console.log('[attPut] →', date, empId);
 
   try {
-    // 1) Snapshot những gì sẽ gửi ở lần này
-    const setSnapshot = new Map();
-    attSetPaths.forEach((v, p) => { if (p.startsWith(prefix)) setSnapshot.set(p, v); });
-    const delSnapshot = new Set();
-    attDelPaths.forEach(p => { if (p.startsWith(prefix)) delSnapshot.add(p); });
-
-    const payload = {};
-    setSnapshot.forEach((v, p) => { payload[p] = v; });
-    delSnapshot.forEach(p => { payload[p] = deleteField(); });
-
-    if (Object.keys(payload).length) {
-      try {
-        await updateDoc(attRef(month), payload);
-      } catch (e) {
-        await setDoc(attRef(month), { days: {}, updatedAt: serverTimestamp() }, { merge: true });
-        await updateDoc(attRef(month), payload);
+    const ref = attRef(month);
+    try {
+      await updateDoc(ref, { [path]: cleanObj(rec), updatedAt: serverTimestamp() });
+    } catch (e) {
+      if (e.code === 'not-found') {
+        const days = {}; days[date] = {}; days[date][empId] = cleanObj(rec);
+        await setDoc(ref, { days, updatedAt: serverTimestamp() });
+      } else {
+        throw e;
       }
     }
-
-    // 2) Chỉ xoá path nếu giá trị hiện tại VẪN là giá trị đã gửi
-    //    (nếu bị ghi đè trong lúc await thì giữ lại để gửi tiếp)
-    setSnapshot.forEach((v, p) => { if (attSetPaths.get(p) === v) attSetPaths.delete(p); });
-    delSnapshot.forEach(p => { if (attDelPaths.has(p) && !attSetPaths.has(p)) attDelPaths.delete(p); });
-
-    // 3) Còn tồn đọng → giữ dirty + hẹn gửi lại
-    let stillDirty = false;
-    attSetPaths.forEach((v, p) => { if (p.startsWith(prefix)) stillDirty = true; });
-    if (!stillDirty) {
-      attDelPaths.forEach(p => { if (p.startsWith(prefix)) stillDirty = true; });
-    }
-
-    if (stillDirty) {
-      dirtyMonths.add(month);
-      clearTimeout(attTimers.get(month));
-      attTimers.set(month, setTimeout(() => {
-        attTimers.delete(month);
-        pushMonth(month);
-      }, 300));
-    } else {
-      dirtyMonths.delete(month);
-      setSyncStatus('ok', 'Đã đồng bộ');
-    }
+    setSyncStatus('ok', 'Đã đồng bộ');
+    console.log('✅ [attPut]', date, empId);
   } catch (e) {
-    console.error(e);
-    setSyncStatus('error', 'Lỗi đồng bộ');
-  } finally {
-    inflightMonths.delete(month);
+    console.error('❌ [attPut]', date, empId, e.code, e.message);
+    setSyncStatus('error', 'Lỗi: ' + (e.code || ''));
   }
 }
-function scheduleMonth(month, immediate) {  console.log('⏱ scheduleMonth', { month, immediate, dirtyHasMonth: dirtyMonths.has(month), attSetSize: attSetPaths.size });
-  clearTimeout(attTimers.get(month));
-  if (immediate) { attTimers.delete(month); pushMonth(month); return; }
-  attTimers.set(month, setTimeout(() => { attTimers.delete(month); pushMonth(month); }, 400));
-}
-async function flushAll() {
+
+async function attDel(date, empId) {
+  if (!isDateStr(date)) return;
+  saveLocal();
   if (!currentUser || !isConfigured) return;
-  clearTimeout(metaTimer);
-  attTimers.forEach(t => clearTimeout(t)); attTimers.clear();
+
+  const month = monthOf(date);
+  const path = `days.${date}.${empId}`;
+  setSyncStatus('syncing', 'Đang lưu...');
+  console.log('[attDel] →', date, empId);
+
   try {
-    await Promise.all([pushMeta(), ...[...dirtyMonths].map(m => pushMonth(m))]);
-  } catch (e) { console.error(e); }
+    await updateDoc(attRef(month), { [path]: deleteField() });
+    setSyncStatus('ok', 'Đã đồng bộ');
+    console.log('✅ [attDel]', date, empId);
+  } catch (e) {
+    if (e.code === 'not-found') { setSyncStatus('ok', 'Đã đồng bộ'); return; }
+    console.error('❌ [attDel]', date, empId, e.code, e.message);
+    setSyncStatus('error', 'Lỗi: ' + (e.code || ''));
+  }
 }
+
+/* No-op để code cũ không lỗi tham chiếu */
+function pushMeta() {}
+function pushMonth() {}
+function scheduleMonth() {}
+function flushAll() {}
+
+/* ============================================================
+   END SYNC ENGINE
+   ============================================================ */
 
 function applyMonthDays(month, days) {
   Object.keys(state.att).forEach(d => { if (monthOf(d) === month) delete state.att[d]; });
   Object.keys(days || {}).forEach(d => { if (isDateStr(d) && days[d]) state.att[d] = days[d]; });
-  const prefix = 'days.' + month + '.';
-  attSetPaths.forEach((v, p) => {
-    if (!p.startsWith(prefix)) return;
-    const rest = p.slice(prefix.length), di = rest.indexOf('.');
-    const date = rest.slice(0, di), empId = rest.slice(di + 1);
-    if (!state.att[date]) state.att[date] = {};
-    state.att[date][empId] = v;
-  });
-  attDelPaths.forEach(p => {
-    if (!p.startsWith(prefix)) return;
-    const rest = p.slice(prefix.length), di = rest.indexOf('.');
-    const date = rest.slice(0, di), empId = rest.slice(di + 1);
-    if (state.att[date]) { delete state.att[date][empId]; if (!Object.keys(state.att[date]).length) delete state.att[date]; }
-  });
   return true;
 }
 function applyMetaData(d) {
@@ -919,17 +838,6 @@ function applyMetaData(d) {
   state.emps = fromMap(d.emps);
   state.shifts = fromMap(d.shifts);
   if (!state.shifts.length) state.shifts = clone(DEFAULT_SHIFTS);
-  metaSetPaths.forEach((v, p) => {
-    const col = p.slice(0, p.indexOf('.'));
-    const arr = state[col];
-    const idx = arr.findIndex(x => x.id === v.id);
-    if (idx >= 0) arr[idx] = v; else arr.push(v);
-  });
-  metaDelPaths.forEach(p => {
-    const col = p.slice(0, p.indexOf('.'));
-    const id = p.slice(p.indexOf('.') + 1);
-    state[col] = state[col].filter(x => x.id !== id);
-  });
   updateAccountTabVisibility();
 }
 function listenAttMonth(month) {
@@ -973,16 +881,12 @@ const ensureMonthForDate = date => ensureMonth(monthOf(date));
 
 function resetState() {
   state = { depts: [], emps: [], shifts: [], att: {} };
-  loadedMonths.clear(); dirtyMonths.clear(); inflightMonths.clear();
-  metaSetPaths.clear(); metaDelPaths.clear(); attSetPaths.clear(); attDelPaths.clear(); metaDirty = false;
+  loadedMonths.clear();
 }
 function stopListeners() {
   if (unsubscribeSnap) { unsubscribeSnap(); unsubscribeSnap = null; }
   attUnsubs.forEach(un => { try { un(); } catch (e) {} });
   attUnsubs.clear();
-  attTimers.forEach(t => clearTimeout(t)); attTimers.clear();
-  clearTimeout(metaTimer);
-  metaSetPaths.clear(); metaDelPaths.clear(); attSetPaths.clear(); attDelPaths.clear(); metaDirty = false;
 }
 async function createSharedBook(uidUser) {
   try {
@@ -1207,7 +1111,7 @@ $('#deptBody').addEventListener('click', e => {
     if (!confirm(msg)) return;
     state.depts = state.depts.filter(x => x.id !== id);
     state.emps.forEach(emp => { if (emp.deptId === id) { emp.deptId = ''; metaPut('emps', emp); } });
-    metaDel('depts', id, true); renderAll(); toast('🗑 Đã xoá bộ phận');
+    metaDel('depts', id); renderAll(); toast('🗑 Đã xoá bộ phận');
   }
 });
 
@@ -1245,7 +1149,7 @@ $('#shiftBody').addEventListener('click', e => {
     if (!confirm(msg)) return;
     state.shifts = state.shifts.filter(x => x.id !== id);
     state.emps.forEach(emp => { if (emp.shiftId === id) { emp.shiftId = ''; metaPut('emps', emp); } });
-    metaDel('shifts', id, true); renderAll(); toast('🗑 Đã xoá ca');
+    metaDel('shifts', id); renderAll(); toast('🗑 Đã xoá ca');
   }
 });
 
@@ -1296,9 +1200,9 @@ $('#empBody').addEventListener('click', e => {
     if (!emp) return;
     if (!confirm(`Xoá nhân viên "${emp.name}"?`)) return;
     state.emps = state.emps.filter(x => x.id !== id);
-    metaDel('emps', id, true);
+    metaDel('emps', id);
     Object.keys(state.att).forEach(date => {
-      if (state.att[date][id]) { delete state.att[date][id]; attDel(date, id, true); }
+      if (state.att[date][id]) { delete state.att[date][id]; attDel(date, id); }
       if (!Object.keys(state.att[date]).length) delete state.att[date];
     });
     renderAll(); toast('🗑 Đã xoá nhân viên');
@@ -1468,7 +1372,7 @@ function renderDetailModal() {
     if (!confirm('Xoá toàn bộ điểm danh của nhân viên này?')) return;
     const d = $('#attDate').value || todayStr();
     if (state.att[d]) { delete state.att[d][empId]; if (!Object.keys(state.att[d]).length) delete state.att[d]; }
-    attDel(d, empId, true); renderAtt(); renderDetailModal(); toast('🗑 Đã xoá hết');
+    attDel(d, empId); renderAtt(); renderDetailModal(); toast('🗑 Đã xoá hết');
   };
   if (cls) cls.onclick = closeModal;
   $$('#modalBody .detail-btn').forEach(btn => {
@@ -1525,7 +1429,7 @@ function resetField(date, empId, field) {
   commitCell(date, empId, rec);
   renderAtt();
 }
-function commitCell(date, empId, rec) {  console.log('📝 commitCell', { date, empId, rec: JSON.parse(JSON.stringify(rec)) });
+function commitCell(date, empId, rec) {
   if (isEmptyRec(rec)) {
     delete state.att[date][empId];
     if (!Object.keys(state.att[date]).length) delete state.att[date];
@@ -1533,7 +1437,7 @@ function commitCell(date, empId, rec) {  console.log('📝 commitCell', { date, 
   } else {
     rec.by = currentUser ? currentUser.uid : 'local';
     rec.byName = currentUser ? usernameOf(currentUser) : 'local';
-    rec.at = (currentUser && isConfigured) ? serverTimestamp() : Date.now();
+    rec.at = (currentUser && isConfigured) ? Date.now() : Date.now();
     state.att[date][empId] = rec;
     attPut(date, empId, rec);
   }
@@ -1599,13 +1503,12 @@ $('#btnReset').onclick = async () => {
   currentDetailEmpId = null; currentDetailList = [];
   state = { depts: [], emps: [], shifts: clone(DEFAULT_SHIFTS), att: {} };
   collapsedShifts.clear(); collapsedDepts.clear();
-  attSetPaths.clear(); attDelPaths.clear(); metaSetPaths.clear(); metaDelPaths.clear();
   saveLocal();
   if (currentUser && isConfigured) {
     try {
       const snap = await getDocs(collection(db, 'att'));
       await Promise.all(snap.docs.map(d => deleteDoc(d.ref)));
-      dirtyMonths.clear(); loadedMonths.clear();
+      loadedMonths.clear();
     } catch (e) { console.error('Không xoá hết được dữ liệu điểm danh trên cloud:', e); }
     await saveToCloud();
   }
@@ -1864,7 +1767,6 @@ if (loginFormEl) loginFormEl.addEventListener('submit', handleLoginSubmit);
 
 $('#btnLogout').onclick = async () => {
   if (!confirm('Đăng xuất khỏi tài khoản này?\nDữ liệu của tài khoản này sẽ được xoá khỏi trình duyệt (bản trên Firebase vẫn còn nguyên).')) return;
-  await flushAll();
   stopListeners(); stopAccounts();
   if (isConfigured) { try { await signOut(auth); } catch (e) { console.error(e); } }
   try { localStorage.removeItem(storeKey()); } catch (e) {}
@@ -2475,100 +2377,9 @@ function startApp() {
   });
 }
 
-/* ============================================================
-   CẢNH BÁO KHI RỜI TRANG MÀ CHƯA ĐỒNG BỘ XONG
-   ============================================================ */
-document.addEventListener('visibilitychange', () => { if (document.hidden) flushAll(); });
-window.addEventListener('pagehide', () => { flushAll(); });
-window.addEventListener('beforeunload', (e) => {
-  const hasDirty = dirtyMonths.size > 0 || metaDirty || attSetPaths.size > 0 || attDelPaths.size > 0 || metaSetPaths.size > 0 || metaDelPaths.size > 0;
-  if (hasDirty) {
-    e.preventDefault();
-    e.returnValue = 'Dữ liệu đang được đồng bộ lên Firebase. Bạn có chắc muốn rời trang?';
-    return e.returnValue;
-  }
-});
-/* ============== DEBUG PATCH ============== */
-window.__dbgState = () => {
-  const out = {
-    currentUser: currentUser ? currentUser.uid : null,
-    isConfigured,
-    dirtyMonths: [...dirtyMonths],
-    attSetPaths: [...attSetPaths.keys()],
-    attDelPaths: [...attDelPaths],
-    inflightMonths: [...inflightMonths],
-    loadedMonths: [...loadedMonths],
-    attUnsubs: [...attUnsubs.keys()],
-    stateEmpsCount: state.emps.length,
-    stateAttDays: Object.keys(state.att),
-    stateAttTodayKeys: (function(){
-      const d = $('#attDate')?.value || todayStr();
-      return state.att[d] ? Object.keys(state.att[d]) : [];
-    })()
-  };
-  console.table(out);
-  return out;
-};
+document.addEventListener('visibilitychange', () => { if (document.hidden) saveLocal(); });
+window.addEventListener('pagehide', () => { saveLocal(); });
 
-window.__dbgPush = async (month) => {
-  month = month || monthOf($('#attDate').value || todayStr());
-  console.log('🚀 force push month =', month);
-  console.log('   BEFORE:', { dirty: [...dirtyMonths], attSet: [...attSetPaths.keys()] });
-  dirtyMonths.add(month);
-  try {
-    await pushMonth(month);
-    console.log('   ✅ pushMonth chạy xong');
-  } catch (e) {
-    console.error('   ❌ pushMonth ném lỗi:', e);
-  }
-  console.log('   AFTER:', { dirty: [...dirtyMonths], attSet: [...attSetPaths.keys()] });
-};
-
-window.__dbgRead = async (month) => {
-  month = month || monthOf($('#attDate').value || todayStr());
-  try {
-    const snap = await getDoc(attRef(month));
-    const d = snap.exists() ? snap.data() : null;
-    console.log(`📥 Server att/${month}:`, d);
-    return d;
-  } catch (e) {
-    console.error('❌ Đọc server lỗi:', e.code, e.message);
-  }
-};
-
-window.__dbgSimulate = async () => {
-  const date = $('#attDate').value || todayStr();
-  const emp = state.emps[0];
-  if (!emp) { console.error('❌ Không có nhân viên'); return; }
-  console.log(`🎬 Giả lập bấm "Vắng ちょうれい" cho ${emp.name} ngày ${date}`);
-  console.log('   BEFORE:', {
-    stateAttEntry: state.att[date]?.[emp.id] || null,
-    dirty: [...dirtyMonths],
-    attSet: [...attSetPaths.keys()]
-  });
-  setField(date, emp.id, 'chore', 'absent');
-  console.log('   AFTER setField:', {
-    stateAttEntry: state.att[date]?.[emp.id] || null,
-    dirty: [...dirtyMonths],
-    attSet: [...attSetPaths.keys()]
-  });
-  await new Promise(r => setTimeout(r, 2000));
-  console.log('   AFTER 2s:', {
-    dirty: [...dirtyMonths],
-    attSet: [...attSetPaths.keys()],
-    inflight: [...inflightMonths]
-  });
-  await window.__dbgRead(monthOf(date));
-};
-
-window.__dbgWrapPush = () => {
-  // Không override được pushMonth từ Console vì là module scope.
-  // Nhưng có thể log khi gọi:
-  console.log('Lưu ý: muốn log pushMonth tự động thì thêm console.log vào trong hàm pushMonth.');
-};
-
-console.log('🐛 Debug sẵn sàng. Gõ: __dbgState() | __dbgSimulate() | __dbgPush() | __dbgRead("YYYY-MM")');
-/* ============ KẾT THÚC DEBUG ============ */
 startApp();
 </script>
 </body>
