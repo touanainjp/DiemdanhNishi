@@ -114,11 +114,14 @@
   .group-shift .gh-icon{font-size:18px}
   .group-shift .gh-time{font-weight:500;font-size:12px;opacity:.85;background:rgba(255,255,255,.18);padding:2px 8px;border-radius:20px}
   .group-shift .gh-count{margin-left:auto;font-weight:700;font-size:12px;background:rgba(255,255,255,.25);padding:3px 10px;border-radius:20px}
-  .group-shift .gh-toggle{font-size:12px;transition:.2s;opacity:.9}
+  .group-shift .gh-toggle{font-size:12px;transition:.2s;opacity:.9;display:inline-block}
   .group-shift.collapsed .gh-toggle{transform:rotate(-90deg)}
-  .group-dept td > div{display:flex;align-items:center;gap:8px;padding:8px 16px 8px 26px;background:#f1f5fb;color:#475569;font-weight:700;font-size:13px;border-top:1px solid #e5e9f2;border-bottom:1px solid #e5e9f2}
-  .group-dept .gd-count{margin-left:auto;font-weight:600;font-size:11.5px;background:#dbe3f0;padding:2px 8px;border-radius:20px;color:#475569}
+  .group-dept td > div{display:flex;align-items:center;gap:8px;padding:8px 16px 8px 24px;background:#ecfdf5;color:#15803d;font-weight:700;font-size:13px;border-top:1px solid #d1fae5;border-bottom:1px solid #d1fae5;border-left:4px solid #16a34a}
+  .group-dept .gd-count{margin-left:auto;font-weight:700;font-size:11.5px;background:#bbf7d0;padding:2px 8px;border-radius:20px;color:#14532d}
+  .group-dept .gd-toggle{font-size:11px;transition:.2s;display:inline-block}
+  .group-dept.collapsed .gd-toggle{transform:rotate(-90deg)}
   tr.emp-row.hidden{display:none}
+  tr.group-header.hidden{display:none !important}
   .stats{display:grid;grid-template-columns:repeat(auto-fit,minmax(100px,1fr));gap:8px;padding:14px 16px;border-bottom:1px solid var(--line)}
   .stat{background:#fafbff;border:1px solid var(--line);border-radius:11px;padding:9px 11px;display:flex;flex-direction:column;gap:1px}
   .stat b{font-size:18px;line-height:1.15}
@@ -321,8 +324,9 @@
     .td-name-cell .emp-dept{font-size:11.5px;margin-top:1px}
     .sum-badge{font-size:10.5px;padding:2px 6px;margin-left:3px}
     #tab-att tbody tr.group-header{background:transparent;border:0;box-shadow:none;padding:0;margin:0;display:block}
+    #tab-att tbody tr.group-header.hidden{display:none !important}
     #tab-att tbody tr.group-shift td > div{border-radius:10px;padding:11px 14px;margin:12px 0 4px}
-    #tab-att tbody tr.group-dept td > div{border-radius:8px;padding:7px 12px;margin:0 0 0;border:1px solid #e5e9f2;background:#f1f5fb}
+    #tab-att tbody tr.group-dept td > div{border-radius:8px;padding:8px 12px;margin:4px 0;border:1px solid #d1fae5;border-left:4px solid #16a34a;background:#ecfdf5}
     .tabs{padding:4px}
     .tabs button{padding:9px 6px;font-size:11.5px;min-width:60px}
     #tab-emp table,#tab-dept table,#tab-shift table{font-size:13px}
@@ -615,7 +619,8 @@ const attRef  = m => doc(db, 'att', m);
 
 let state = { depts: [], emps: [], shifts: [], att: {} };
 let currentUser = null, unsubscribeSnap = null, isLoadingFromCloud = false;
-let collapsedShifts = new Set(), collapsedDepts = new Set();
+/* Trạng thái mở của từng ca / bộ phận. Rỗng = mặc định tất cả đóng. */
+let expandedShifts = new Set(), expandedDepts = new Set();
 let currentDetailEmpId = null, currentDetailList = [];
 let reportSortMode = 'date', reportViewMode = 'grouped';
 let reportViolationFilters = { absent: true, late: true, unpaid: true, paid: true, attire: true };
@@ -882,6 +887,8 @@ const ensureMonthForDate = date => ensureMonth(monthOf(date));
 function resetState() {
   state = { depts: [], emps: [], shifts: [], att: {} };
   loadedMonths.clear();
+  expandedShifts.clear();
+  expandedDepts.clear();
 }
 function stopListeners() {
   if (unsubscribeSnap) { unsubscribeSnap(); unsubscribeSnap = null; }
@@ -1279,15 +1286,18 @@ function renderAtt() {
     const dmap = groups.get(sid);
     let shiftTotal = 0;
     dmap.forEach(arr => shiftTotal += arr.length);
-    const shiftCollapsed = collapsedShifts.has(sid);
-    html += `<tr class="group-header group-shift ${shiftCollapsed ? 'collapsed' : ''}" data-toggle-shift="${sid}"><td colspan="2"><div><span class="gh-toggle">▼</span><span class="gh-icon">${esc(shift.icon)}</span><span class="gh-name">${esc(shift.name)}</span>${shift.time ? `<span class="gh-time">${esc(shift.time)}</span>` : ''}<span class="gh-count">${shiftTotal} NV</span></div></td></tr>`;
+    const shiftOpen = expandedShifts.has(sid);
+    html += `<tr class="group-header group-shift ${shiftOpen ? '' : 'collapsed'}" data-toggle-shift="${sid}"><td colspan="2"><div><span class="gh-toggle">▼</span><span class="gh-icon">${esc(shift.icon)}</span><span class="gh-name">${esc(shift.name)}</span>${shift.time ? `<span class="gh-time">${esc(shift.time)}</span>` : ''}<span class="gh-count">${shiftTotal} NV</span></div></td></tr>`;
     const deptIds = [...dmap.keys()].sort((a, b) => deptName(a).localeCompare(deptName(b), 'vi'));
     deptIds.forEach(did => {
       const emps = dmap.get(did);
       const deptKey = `${sid}::${did}`;
-      const deptCollapsed = collapsedDepts.has(deptKey);
-      html += `<tr class="group-header group-dept ${deptCollapsed ? 'collapsed' : ''}" data-toggle-dept="${deptKey}"><td colspan="2"><div><span>🏢</span><span>${esc(deptName(did))}</span><span class="gd-count">${emps.length}</span></div></td></tr>`;
-      const hide = shiftCollapsed || deptCollapsed;
+      const deptOpen = expandedDepts.has(deptKey);
+      // Bộ phận chỉ hiện khi ca mở
+      const deptHidden = !shiftOpen;
+      html += `<tr class="group-header group-dept ${deptOpen ? '' : 'collapsed'} ${deptHidden ? 'hidden' : ''}" data-toggle-dept="${deptKey}"><td colspan="2"><div><span class="gd-toggle">▼</span><span>🏢</span><span>${esc(deptName(did))}</span><span class="gd-count">${emps.length}</span></div></td></tr>`;
+      // Nhân viên chỉ hiện khi cả ca và bộ phận đều mở
+      const hide = !shiftOpen || !deptOpen;
       emps.forEach((e, i) => {
         const r = getEffectiveRec(rec[e.id]);
         const row = buildEmpRowHtml(e, r, i + 1);
@@ -1437,7 +1447,7 @@ function commitCell(date, empId, rec) {
   } else {
     rec.by = currentUser ? currentUser.uid : 'local';
     rec.byName = currentUser ? usernameOf(currentUser) : 'local';
-    rec.at = (currentUser && isConfigured) ? Date.now() : Date.now();
+    rec.at = Date.now();
     state.att[date][empId] = rec;
     attPut(date, empId, rec);
   }
@@ -1454,9 +1464,19 @@ function fmtMarkedBy(rec) {
 }
 $('#attBody').addEventListener('click', e => {
   const shiftHeader = e.target.closest('[data-toggle-shift]');
-  if (shiftHeader) { const sid = shiftHeader.dataset.toggleShift; if (collapsedShifts.has(sid)) collapsedShifts.delete(sid); else collapsedShifts.add(sid); renderAtt(); return; }
+  if (shiftHeader) {
+    const sid = shiftHeader.dataset.toggleShift;
+    if (expandedShifts.has(sid)) expandedShifts.delete(sid); else expandedShifts.add(sid);
+    renderAtt();
+    return;
+  }
   const deptHeader = e.target.closest('[data-toggle-dept]');
-  if (deptHeader) { const key = deptHeader.dataset.toggleDept; if (collapsedDepts.has(key)) collapsedDepts.delete(key); else collapsedDepts.add(key); renderAtt(); return; }
+  if (deptHeader) {
+    const key = deptHeader.dataset.toggleDept;
+    if (expandedDepts.has(key)) expandedDepts.delete(key); else expandedDepts.add(key);
+    renderAtt();
+    return;
+  }
   const row = e.target.closest('[data-emp-row]');
   if (row) openDetailModal(row.dataset.empRow);
 });
@@ -1502,7 +1522,7 @@ $('#btnReset').onclick = async () => {
   closeModal(true);
   currentDetailEmpId = null; currentDetailList = [];
   state = { depts: [], emps: [], shifts: clone(DEFAULT_SHIFTS), att: {} };
-  collapsedShifts.clear(); collapsedDepts.clear();
+  expandedShifts.clear(); expandedDepts.clear();
   saveLocal();
   if (currentUser && isConfigured) {
     try {
