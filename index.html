@@ -815,10 +815,17 @@ function attDel(date, empId, immediate = false) {
    được thêm trong lúc await updateDoc)
    ============================================================ */
 async function pushMonth(month) {
-  if (!currentUser || !isConfigured) return;
-  if (inflightMonths.has(month)) return;
-  if (!dirtyMonths.has(month)) return;
-
+ console.log('🔥 pushMonth(%s)', month);
+  if (!currentUser) { console.warn('   ⛔ return: chưa login'); return; }
+  if (!isConfigured) { console.warn('   ⛔ return: chưa cấu hình Firebase'); return; }
+  if (inflightMonths.has(month)) {
+    console.warn('   ⛔ return: INFLIGHT BỊ KẸT!', [...inflightMonths]);
+    return;
+  }
+  if (!dirtyMonths.has(month)) {
+    console.warn('   ⛔ return: KHÔNG DIRTY. dirty hiện tại =', [...dirtyMonths]);
+    return;
+  }
   inflightMonths.add(month);
   setSyncStatus('syncing', 'Đang lưu...');
   const prefix = 'days.' + month + '.';
