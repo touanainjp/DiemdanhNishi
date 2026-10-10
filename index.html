@@ -723,6 +723,10 @@ const cleanObj = o => {
   return out;
 };
 
+/* ============================================================
+   PUSH META — đã sửa lỗi race condition (không mất thay đổi
+   được thêm trong lúc await updateDoc)
+   ============================================================ */
 function metaPut(col, item, immediate = false) {
   metaSetPaths.set(col + '.' + item.id, cleanObj(item));
   metaDelPaths.delete(col + '.' + item.id);
@@ -743,19 +747,40 @@ async function pushMeta() {
   if (!currentUser || !isConfigured || !metaDirty || metaInflight) return;
   metaInflight = true; setSyncStatus('syncing', 'Đang lưu...');
   try {
+    // 1) Snapshot những gì sẽ gửi ở lần này
+    const setSnapshot = new Map(metaSetPaths);
+    const delSnapshot = new Set(metaDelPaths);
+
     const payload = {};
-    metaSetPaths.forEach((v, p) => { payload[p] = v; });
-    metaDelPaths.forEach(p => { payload[p] = deleteField(); });
-    try {
-      await updateDoc(metaRef(), payload);
-    } catch (e) {
-      await setDoc(metaRef(), { depts: {}, emps: {}, shifts: {}, owner: currentUser.uid, updatedAt: serverTimestamp() }, { merge: true });
-      await updateDoc(metaRef(), payload);
+    setSnapshot.forEach((v, p) => { payload[p] = v; });
+    delSnapshot.forEach(p => { payload[p] = deleteField(); });
+
+    if (Object.keys(payload).length) {
+      try {
+        await updateDoc(metaRef(), payload);
+      } catch (e) {
+        await setDoc(metaRef(), { depts: {}, emps: {}, shifts: {}, owner: currentUser.uid, updatedAt: serverTimestamp() }, { merge: true });
+        await updateDoc(metaRef(), payload);
+      }
     }
-    metaSetPaths.clear(); metaDelPaths.clear(); metaDirty = false;
-    setSyncStatus('ok', 'Đã đồng bộ');
-  } catch (e) { console.error(e); setSyncStatus('error', 'Lỗi đồng bộ'); }
-  finally { metaInflight = false; }
+
+    // 2) Chỉ xoá path nếu giá trị hiện tại VẪN là giá trị đã gửi
+    //    (nếu bị ghi đè trong lúc await thì giữ lại để gửi tiếp)
+    setSnapshot.forEach((v, p) => { if (metaSetPaths.get(p) === v) metaSetPaths.delete(p); });
+    delSnapshot.forEach(p => { if (metaDelPaths.has(p) && !metaSetPaths.has(p)) metaDelPaths.delete(p); });
+
+    // 3) Còn tồn đọng → hẹn gửi lại
+    if (metaSetPaths.size > 0 || metaDelPaths.size > 0) {
+      metaDirty = true;
+      clearTimeout(metaTimer);
+      metaTimer = setTimeout(pushMeta, 300);
+    } else {
+      metaDirty = false;
+      setSyncStatus('ok', 'Đã đồng bộ');
+    }
+  } catch (e) {
+    console.error(e); setSyncStatus('error', 'Lỗi đồng bộ');
+  } finally { metaInflight = false; }
 }
 async function saveToCloud() {
   saveLocal();
@@ -769,6 +794,7 @@ async function saveToCloud() {
 }
 
 function attPut(date, empId, rec, immediate = false) {
+  if (!isDateStr(date)) { console.warn('attPut: ngày không hợp lệ', date); return; }
   attSetPaths.set(`days.${date}.${empId}`, cleanObj(rec));
   attDelPaths.delete(`days.${date}.${empId}`);
   saveLocal(); markAttDirty(date);
@@ -776,20 +802,38 @@ function attPut(date, empId, rec, immediate = false) {
   scheduleMonth(monthOf(date), immediate);
 }
 function attDel(date, empId, immediate = false) {
+  if (!isDateStr(date)) { console.warn('attDel: ngày không hợp lệ', date); return; }
   attSetPaths.delete(`days.${date}.${empId}`);
   attDelPaths.add(`days.${date}.${empId}`);
   saveLocal(); markAttDirty(date);
   if (!currentUser || !isConfigured) return;
   scheduleMonth(monthOf(date), immediate);
 }
+
+/* ============================================================
+   PUSH MONTH — đã sửa lỗi race condition (không mất thay đổi
+   được thêm trong lúc await updateDoc)
+   ============================================================ */
 async function pushMonth(month) {
-  if (!currentUser || !isConfigured || !dirtyMonths.has(month) || inflightMonths.has(month)) return;
-  inflightMonths.add(month); setSyncStatus('syncing', 'Đang lưu...');
+  if (!currentUser || !isConfigured) return;
+  if (inflightMonths.has(month)) return;
+  if (!dirtyMonths.has(month)) return;
+
+  inflightMonths.add(month);
+  setSyncStatus('syncing', 'Đang lưu...');
+  const prefix = 'days.' + month + '.';
+
   try {
-    const prefix = 'days.' + month + '.';
+    // 1) Snapshot những gì sẽ gửi ở lần này
+    const setSnapshot = new Map();
+    attSetPaths.forEach((v, p) => { if (p.startsWith(prefix)) setSnapshot.set(p, v); });
+    const delSnapshot = new Set();
+    attDelPaths.forEach(p => { if (p.startsWith(prefix)) delSnapshot.add(p); });
+
     const payload = {};
-    attSetPaths.forEach((v, p) => { if (p.startsWith(prefix)) payload[p] = v; });
-    attDelPaths.forEach(p => { if (p.startsWith(prefix)) payload[p] = deleteField(); });
+    setSnapshot.forEach((v, p) => { payload[p] = v; });
+    delSnapshot.forEach(p => { payload[p] = deleteField(); });
+
     if (Object.keys(payload).length) {
       try {
         await updateDoc(attRef(month), payload);
@@ -798,11 +842,36 @@ async function pushMonth(month) {
         await updateDoc(attRef(month), payload);
       }
     }
-    [...attSetPaths.keys()].forEach(p => { if (p.startsWith(prefix)) attSetPaths.delete(p); });
-    [...attDelPaths].forEach(p => { if (p.startsWith(prefix)) attDelPaths.delete(p); });
-    dirtyMonths.delete(month); setSyncStatus('ok', 'Đã đồng bộ');
-  } catch (e) { console.error(e); setSyncStatus('error', 'Lỗi đồng bộ'); }
-  finally { inflightMonths.delete(month); }
+
+    // 2) Chỉ xoá path nếu giá trị hiện tại VẪN là giá trị đã gửi
+    //    (nếu bị ghi đè trong lúc await thì giữ lại để gửi tiếp)
+    setSnapshot.forEach((v, p) => { if (attSetPaths.get(p) === v) attSetPaths.delete(p); });
+    delSnapshot.forEach(p => { if (attDelPaths.has(p) && !attSetPaths.has(p)) attDelPaths.delete(p); });
+
+    // 3) Còn tồn đọng → giữ dirty + hẹn gửi lại
+    let stillDirty = false;
+    attSetPaths.forEach((v, p) => { if (p.startsWith(prefix)) stillDirty = true; });
+    if (!stillDirty) {
+      attDelPaths.forEach(p => { if (p.startsWith(prefix)) stillDirty = true; });
+    }
+
+    if (stillDirty) {
+      dirtyMonths.add(month);
+      clearTimeout(attTimers.get(month));
+      attTimers.set(month, setTimeout(() => {
+        attTimers.delete(month);
+        pushMonth(month);
+      }, 300));
+    } else {
+      dirtyMonths.delete(month);
+      setSyncStatus('ok', 'Đã đồng bộ');
+    }
+  } catch (e) {
+    console.error(e);
+    setSyncStatus('error', 'Lỗi đồng bộ');
+  } finally {
+    inflightMonths.delete(month);
+  }
 }
 function scheduleMonth(month, immediate) {
   clearTimeout(attTimers.get(month));
@@ -813,7 +882,9 @@ async function flushAll() {
   if (!currentUser || !isConfigured) return;
   clearTimeout(metaTimer);
   attTimers.forEach(t => clearTimeout(t)); attTimers.clear();
-  await Promise.all([pushMeta(), ...[...dirtyMonths].map(m => pushMonth(m))]);
+  try {
+    await Promise.all([pushMeta(), ...[...dirtyMonths].map(m => pushMonth(m))]);
+  } catch (e) { console.error(e); }
 }
 
 function applyMonthDays(month, days) {
@@ -2396,8 +2467,20 @@ function startApp() {
     } finally { showLoading(false); }
   });
 }
+
+/* ============================================================
+   CẢNH BÁO KHI RỜI TRANG MÀ CHƯA ĐỒNG BỘ XONG
+   ============================================================ */
 document.addEventListener('visibilitychange', () => { if (document.hidden) flushAll(); });
 window.addEventListener('pagehide', () => { flushAll(); });
+window.addEventListener('beforeunload', (e) => {
+  const hasDirty = dirtyMonths.size > 0 || metaDirty || attSetPaths.size > 0 || attDelPaths.size > 0 || metaSetPaths.size > 0 || metaDelPaths.size > 0;
+  if (hasDirty) {
+    e.preventDefault();
+    e.returnValue = 'Dữ liệu đang được đồng bộ lên Firebase. Bạn có chắc muốn rời trang?';
+    return e.returnValue;
+  }
+});
 startApp();
 </script>
 </body>
